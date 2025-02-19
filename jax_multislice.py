@@ -3,73 +3,7 @@ import jax.numpy as jnp
 from ase import units
 from functools import partial
 
-@partial(jax.jit, static_argnums=(1, 2, 3))
-def forward(slices,
-            probe,
-            propagation_kernel,
-            scan_position_px):
-
-    """
-    Forward model for a multislice simulation.
-
-    Args:
-        slices: The 3D array representing the object potential.
-        probe: The probe to use for the simulation.
-        propagation_kernel: The kernel used for propagation between slices.
-        scan_position_px: The scan position in pixels.
-
-    Returns:
-        The simulated diffraction pattern.
-    """
-    probe_shifted = jnp.roll(probe, scan_position_px, axis=(0, 1))
-    exit_wave = probe_shifted * slices[0]
-
-    def body_fun(i, exit_wave):
-        exit_wave = FresnelPropagator(exit_wave, propagation_kernel)
-        exit_wave = exit_wave * slices[i]
-        return exit_wave
-
-    exit_wave = jax.lax.fori_loop(1,
-                                  slices.shape[0],
-                                  body_fun,
-                                  exit_wave)
-
-    diffraction_pattern = jnp.abs(jnp.fft.fftshift(jnp.fft.fft2(exit_wave)))
-    return diffraction_pattern
-
-@partial(jax.jit, static_argnums=(1, 2, 3, 4, 5))
-def forward_with_scan_positions(slices,
-                                probe,
-                                scan_positions_px,
-                                energy,
-                                sampling,
-                                slice_thickness):
-    """
-    Forward model for a multislice simulation with scan positions.
-
-    Args:
-        slices: The 3D array representing the object potential.
-        probe: The probe to use for the simulation.
-        scan_positions_px: The scan positions in pixels.
-        energy: The energy of the incident wave in eV.
-        sampling: The sampling intervals in the x and y directions.
-        slice_thickness: The thickness of each slice.
-
-    Returns:
-        The simulated diffraction patterns for the given scan positions.
-    """
-    n, m = slices.shape[1::]
-    scan_positions_shape = scan_positions_px.shape[0:2]
-    scan_positions_px = scan_positions_px.reshape(-1, 2)
-    H = propagation_kernel(n, m, sampling, slice_thickness, energy)
-    transmission = transmission_function(slices, energy)
-
-    diffraction_patterns = jax.vmap(lambda pos: forward(transmission, probe, H, pos))(scan_positions_px)
-    diffraction_patterns = diffraction_patterns.reshape((*scan_positions_shape, n, m))
-    return diffraction_patterns
-
-
-def move_probe(probe, shift):
+def move_probe(probe, new_pos):
     """
     Move the probe by a given shift.
 
@@ -80,9 +14,17 @@ def move_probe(probe, shift):
     Returns:
         The probe after the shift.
     """
-    new_row = -(shift[1] - probe.shape[1]//2)
-    new_col = shift[0] - probe.shape[0]//2
-    shift = jnp.array([new_row, new_col])
+    current_pos_row = probe.shape[0]//2 #probe coordinates are in y, x
+    current_pos_col = probe.shape[1]//2 #probe coordinates are in y, x
+    new_pos_row = new_pos[0] #scan coordinates are given in x, y
+    new_pos_col = new_pos[1] #scan coordinates are given in x, y
+
+    # if probe.shape[0] % 2 == 1:
+    #     current_pos_row += 1
+
+    shift_to_row = new_pos_row - current_pos_row
+    shift_to_col = new_pos_col - current_pos_col
+    shift = jnp.array([shift_to_row, shift_to_col])
 
     return jnp.roll(probe, shift, axis=(0, 1))
 
@@ -96,7 +38,7 @@ def propagation_kernel(n: int,
 
     fx = jnp.fft.fftfreq(n, ps[0])
     fy = jnp.fft.fftfreq(m, ps[1])
-    Fx, Fy = jnp.meshgrid(fy, fx)
+    Fx, Fy = jnp.meshgrid(fx, fy, indexing='ij')
 
     H = jnp.exp(1j * (
         2 * jnp.pi / wavelength) * z) * jnp.exp(
