@@ -29,16 +29,26 @@ def move_probe(probe, new_pos):
     return jnp.roll(probe, shift, axis=(0, 1))
 
 
+def get_frequencies(shape, sampling):
+    n, m = shape
+    fx = jnp.fft.fftfreq(n, sampling[0])
+    fy = jnp.fft.fftfreq(m, sampling[1])
+    Fx, Fy = jnp.meshgrid(fx, fy, indexing='ij')
+    return Fx, Fy
+
+
+@jax.jit
+def shift_kernel(x0, y0, Fx, Fy):
+    return jnp.exp(-1j * 2 * jnp.pi * (Fx * x0 + Fy * y0))
+
+
 def propagation_kernel(n: int,
                        m: int,
                        ps: float,
                        z: float,
                        energy: float):
     wavelength = energy2wavelength(energy)
-
-    fx = jnp.fft.fftfreq(n, ps[0])
-    fy = jnp.fft.fftfreq(m, ps[1])
-    Fx, Fy = jnp.meshgrid(fx, fy, indexing='ij')
+    Fx, Fy = get_frequencies(n, m, ps)
 
     H = jnp.exp(1j * (
         2 * jnp.pi / wavelength) * z) * jnp.exp(
