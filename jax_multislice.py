@@ -1,5 +1,9 @@
+import numpy as np
 import jax
 import jax.numpy as jnp
+import jax_dataclasses as jdc
+from abtem.multislice import _generate_potential_configurations
+from abtem.antialias import AntialiasAperture
 from ase import units
 from functools import partial
 
@@ -60,14 +64,30 @@ def propagation_kernel(n: int,
 @jax.jit
 def FresnelPropagator(u, H):
     ufft = jnp.fft.fft2(u)
-    u_prop = jnp.fft.ifft2(H * ufft)
-    return u_prop
+    return jnp.fft.ifft2(H * ufft)
 
 
 @jax.jit
 def transmission_function(array, energy):
     sigma = energy2sigma(energy)
     return jnp.exp(1j * sigma * array)
+
+
+def get_abtem_transmit(potential, energy):
+    t_functions = []
+    for _, potential_configuration in _generate_potential_configurations(
+        potential
+    ):
+        for potential_slice in potential_configuration.generate_slices():
+            transmission_function = potential_slice.transmission_function(
+                energy=energy
+            )
+            transmission_function = AntialiasAperture().bandlimit(
+                transmission_function, in_place=False
+            )
+            t_functions.append(transmission_function.array)
+
+    return np.concatenate(t_functions, axis=0)
 
 
 @jax.jit
@@ -137,3 +157,47 @@ def energy2wavelength(energy: float) -> float:
         / units._e
         * 1.0e10
     ).astype(jnp.float32)
+
+
+@jdc.pytree_dataclass
+class ProbeParamsFixed:
+    wavelength: jdc.Static[float]
+    alpha: jnp.array
+    phi: jnp.array
+    aperture: jnp.array
+
+
+@jdc.pytree_dataclass
+class ProbeParamsVariable:
+    defocus: float = 0.
+    astigmatism: float = 0.
+    astigmatism_angle: float = 0.
+    Cs: float = 0.
+    coma: float = 0.
+    coma_angle: float = 0.
+    trefoil: float = 0.
+    trefoil_angle: float = 0.
+
+
+@jax.jit
+def make_probe_fft(pp: ProbeParamsVariable, fpp: ProbeParamsFixed):
+    alpha = fpp.alpha
+    phi = fpp.phi
+    aperture = fpp.aperture
+
+    aberrations = jnp.zeros(alpha.shape, dtype=jnp.float32)
+    aberrations += ((1 / 2) * alpha**2 * pp.defocus)
+    aberrations += ((1 / 2) * alpha**2 * pp.astigmatism * jnp.cos(2 * (phi - pp.astigmatism_angle)))
+    aberrations += ((1 / 3) * alpha**3 * pp.coma * jnp.cos(phi - pp.coma_angle))
+    aberrations += ((1 / 3) * alpha**3 * pp.trefoil * jnp.cos(3 * (phi - pp.trefoil_angle)))
+    aberrations += ((1 / 4) * alpha**4 * pp.Cs)
+    aberrations *= (2 * jnp.pi / fpp.wavelength)
+    # aberrations = jnp.exp(-1j * aberrations)
+    aberrations = jnp.cos(-aberrations) + 1.0j * jnp.sin(-aberrations)
+
+    probe_fft = jnp.ones(alpha.shape, dtype=jnp.complex64)
+    probe_fft *= aperture
+    probe_fft *= aberrations
+    probe_fft /= jnp.linalg.norm(probe_fft)
+    return probe_fft
+
